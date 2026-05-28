@@ -42,7 +42,7 @@ These are detected explicitly, but their published APIs do not expose Servarr-st
 
 - `disabled`: skip the app entirely.
 - `addOnly`: create missing managed download clients, but do not update or delete existing ones.
-- `fullSync`: create, update, and remove only the download clients tagged as managed by this mod.
+- `fullSync`: create, update, and remove only the download clients managed by this mod through its state file.
 
 ## Ownership Rule
 
