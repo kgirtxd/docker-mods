@@ -66,6 +66,7 @@ DEFAULTS = {
     "PROWLARR_SYNC_LOG_LEVEL": "info",
 }
 PROWLARR_DB_PATH = "/config/prowlarr.db"
+STATE_PATH = "/config/prowlarr-sync-download-clients-state.json"
 FIELD_ALIASES = {
     "BaseUrl": ("BaseUrl", "baseUrl"),
     "ApiKey": ("ApiKey", "apiKey"),
@@ -162,6 +163,62 @@ def request_json(method, base_url, path, headers, payload=None, timeout=15):
         if not body:
             return None
         return json.loads(body.decode("utf-8"))
+
+
+def load_state():
+    state_path = os.getenv("PROWLARR_SYNC_STATE_PATH", STATE_PATH).strip() or STATE_PATH
+    if not os.path.exists(state_path):
+        return {"version": 1, "apps": {}}
+    try:
+        with open(state_path, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError) as exc:
+        logging.warning("unable to read state file %s: %s", state_path, exc)
+        return {"version": 1, "apps": {}}
+
+    if not isinstance(state, dict):
+        return {"version": 1, "apps": {}}
+    state.setdefault("version", 1)
+    state.setdefault("apps", {})
+    return state
+
+
+def save_state(state):
+    state_path = os.getenv("PROWLARR_SYNC_STATE_PATH", STATE_PATH).strip() or STATE_PATH
+    temp_path = state_path + ".tmp"
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(temp_path, state_path)
+
+
+def identity_to_key(identity):
+    implementation, name = identity
+    return f"{implementation or ''}\x1f{name or ''}"
+
+
+def key_to_identity(identity_key):
+    implementation, name = identity_key.split("\x1f", 1)
+    return (implementation or None, name or None)
+
+
+def app_state_key(app_ctx):
+    return f"{app_ctx['kind']}|{app_ctx['base_url']}"
+
+
+def get_managed_identity_keys(state, app_ctx):
+    app_state = state.get("apps", {}).get(app_state_key(app_ctx), {})
+    managed = app_state.get("managedIdentities", [])
+    return {item for item in managed if isinstance(item, str)}
+
+
+def set_managed_identity_keys(state, app_ctx, managed_keys):
+    apps = state.setdefault("apps", {})
+    app_key = app_state_key(app_ctx)
+    apps[app_key] = {
+        "managedIdentities": sorted(managed_keys),
+    }
 
 
 def parse_embedded_json(value, default):
@@ -372,7 +429,7 @@ def build_field_list_from_settings(schema_fields, existing_fields, prowlarr_sett
     return fields
 
 
-def build_client_payload(prowlarr_client, schema_client, existing_client, managed_tag_id):
+def build_client_payload(prowlarr_client, schema_client, existing_client, legacy_tag_id):
     schema_client = schema_client or {}
     existing_client = existing_client or {}
     payload = {}
@@ -407,8 +464,8 @@ def build_client_payload(prowlarr_client, schema_client, existing_client, manage
     for tag in existing_client.get("tags") or schema_client.get("tags") or []:
         if tag not in tags:
             tags.append(tag)
-    if managed_tag_id not in tags:
-        tags.append(managed_tag_id)
+    if legacy_tag_id is not None:
+        tags = [tag for tag in tags if tag != legacy_tag_id]
     payload["tags"] = sorted(tags)
     return payload
 
@@ -426,7 +483,7 @@ def canonicalize_resource(resource):
     return walk(resource)
 
 
-def ensure_tag(app_ctx, timeout):
+def find_legacy_tag_id(app_ctx, timeout):
     tags = request_json(
         "GET", app_ctx["base_url"], app_ctx["api_base"] + "/tag", app_ctx["headers"], timeout=timeout
     )
@@ -434,16 +491,7 @@ def ensure_tag(app_ctx, timeout):
     for tag in tags or []:
         if tag.get("label") == label:
             return tag["id"]
-
-    created = request_json(
-        "POST",
-        app_ctx["base_url"],
-        app_ctx["api_base"] + "/tag",
-        app_ctx["headers"],
-        {"label": label},
-        timeout=timeout,
-    )
-    return created["id"]
+    return None
 
 
 def build_app_context(app, timeout, managed_tag):
@@ -490,9 +538,10 @@ def build_app_context(app, timeout, managed_tag):
     }
 
 
-def reconcile_app(app_ctx, prowlarr_clients, summary):
+def reconcile_app(app_ctx, prowlarr_clients, summary, state):
     timeout = app_ctx["timeout"]
-    tag_id = ensure_tag(app_ctx, timeout)
+    legacy_tag_id = find_legacy_tag_id(app_ctx, timeout)
+    managed_state_keys = get_managed_identity_keys(state, app_ctx)
 
     downstream_clients = request_json(
         "GET",
@@ -516,12 +565,14 @@ def reconcile_app(app_ctx, prowlarr_clients, summary):
     }
 
     managed_existing = {}
-    tagged_resources = []
+    managed_existing_keys = set()
     for client in downstream_clients:
+        identity = managed_identity(client)
+        identity_key = identity_to_key(identity)
         tags = client.get("tags") or []
-        if tag_id in tags:
-            tagged_resources.append(client)
-            managed_existing[managed_identity(client)] = client
+        if identity_key in managed_state_keys or (legacy_tag_id is not None and legacy_tag_id in tags):
+            managed_existing[identity] = client
+            managed_existing_keys.add(identity_key)
 
     desired = {}
     retained_identities = set()
@@ -545,11 +596,13 @@ def reconcile_app(app_ctx, prowlarr_clients, summary):
             prowlarr_client,
             schema_client,
             managed_existing.get(identity),
-            tag_id,
+            legacy_tag_id,
         )
 
     sync_level = app_ctx["sync_level"]
+    final_managed_keys = set(managed_existing_keys)
     for identity, payload in desired.items():
+        identity_key = identity_to_key(identity)
         existing = managed_existing.get(identity)
         if existing is None:
             request_json(
@@ -561,9 +614,11 @@ def reconcile_app(app_ctx, prowlarr_clients, summary):
                 timeout=timeout,
             )
             summary["created"] += 1
+            final_managed_keys.add(identity_key)
             continue
 
         if sync_level != "fullSync":
+            final_managed_keys.add(identity_key)
             continue
 
         candidate = clone_json(payload)
@@ -573,7 +628,7 @@ def reconcile_app(app_ctx, prowlarr_clients, summary):
             existing,
             schema_by_implementation.get(existing.get("implementation"), {}),
             existing,
-            tag_id,
+            legacy_tag_id,
         )
         current["id"] = existing["id"]
 
@@ -587,11 +642,12 @@ def reconcile_app(app_ctx, prowlarr_clients, summary):
                 timeout=timeout,
             )
             summary["updated"] += 1
+        final_managed_keys.add(identity_key)
 
     if sync_level == "fullSync":
         desired_identities = set(desired)
-        for existing in tagged_resources:
-            if managed_identity(existing) in desired_identities | retained_identities:
+        for identity, existing in managed_existing.items():
+            if identity in desired_identities | retained_identities:
                 continue
             request_json(
                 "DELETE",
@@ -601,6 +657,9 @@ def reconcile_app(app_ctx, prowlarr_clients, summary):
                 timeout=timeout,
             )
             summary["deleted"] += 1
+            final_managed_keys.discard(identity_to_key(identity))
+
+    set_managed_identity_keys(state, app_ctx, final_managed_keys)
 
 
 def sync_once():
@@ -612,6 +671,7 @@ def sync_once():
     prowlarr_api_key = load_prowlarr_api_key()
     prowlarr_headers = make_headers(prowlarr_api_key)
     wait_for_prowlarr(prowlarr_url, prowlarr_headers, timeout)
+    state = load_state()
 
     applications = request_json(
         "GET", prowlarr_url, "/api/v1/applications", prowlarr_headers, timeout=timeout
@@ -646,7 +706,7 @@ def sync_once():
 
         summary["apps_processed"] += 1
         try:
-            reconcile_app(app_ctx, prowlarr_clients, summary)
+            reconcile_app(app_ctx, prowlarr_clients, summary, state)
         except Exception as exc:
             summary["failed"] += 1
             logging.exception(
@@ -656,6 +716,7 @@ def sync_once():
                 exc,
             )
 
+    save_state(state)
     logging.info(
         "sync summary: apps_processed=%d created=%d updated=%d deleted=%d skipped_unsupported=%d failed=%d",
         summary["apps_processed"],

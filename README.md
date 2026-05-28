@@ -35,7 +35,7 @@ These are detected explicitly, but their published APIs do not expose Servarr-st
 | `PROWLARR_SYNC_API_KEY` | unset | Prowlarr API key. If unset, the mod reads `/config/config.xml`. |
 | `PROWLARR_SYNC_INTERVAL` | `300` | Seconds to wait between sync passes. |
 | `PROWLARR_SYNC_TIMEOUT` | `15` | Per-request HTTP timeout in seconds. |
-| `PROWLARR_SYNC_MANAGED_TAG` | `prowlarr-sync-download-clients` | Tag added to downstream clients managed by this mod. |
+| `PROWLARR_SYNC_MANAGED_TAG` | `prowlarr-sync-download-clients` | Legacy migration tag label used only to detect clients created by older versions of the mod. |
 | `PROWLARR_SYNC_LOG_LEVEL` | `info` | Python log level for the sync service. |
 
 ## Sync Semantics
@@ -46,7 +46,7 @@ These are detected explicitly, but their published APIs do not expose Servarr-st
 
 ## Ownership Rule
 
-Only download clients with the managed tag are reconciled destructively. Untagged or manually created clients in Sonarr, Radarr, Lidarr, Readarr, and Whisparr are left alone.
+Ownership is tracked in the mod state file under `/config`, not via app tags. The mod only updates or deletes clients it previously created or clients carrying the legacy migration tag from older versions. Manual clients in Sonarr, Radarr, Lidarr, Readarr, and Whisparr are left alone.
 
 ## Operation
 
