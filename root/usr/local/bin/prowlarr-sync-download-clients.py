@@ -64,7 +64,13 @@ DEFAULTS = {
     "PROWLARR_SYNC_MANAGED_TAG": "prowlarr-sync-download-clients",
     "PROWLARR_SYNC_LOG_LEVEL": "info",
 }
-FIELD_KEYS = ("BaseUrl", "ApiKey", "AuthUsername", "AuthPassword", "ProwlarrUrl")
+FIELD_ALIASES = {
+    "BaseUrl": ("BaseUrl", "baseUrl"),
+    "ApiKey": ("ApiKey", "apiKey"),
+    "AuthUsername": ("AuthUsername", "authUsername"),
+    "AuthPassword": ("AuthPassword", "authPassword"),
+    "ProwlarrUrl": ("ProwlarrUrl", "prowlarrUrl"),
+}
 COPY_TOP_LEVEL_KEYS = {
     "name",
     "implementation",
@@ -190,7 +196,19 @@ def field_map(resource):
 
 def extract_application_settings(app):
     fields = field_map(app)
-    return {name: (fields.get(name) or {}).get("value") for name in FIELD_KEYS}
+    lowered_fields = {name.lower(): field for name, field in fields.items()}
+    settings = {}
+    for canonical_name, aliases in FIELD_ALIASES.items():
+        value = None
+        for alias in aliases:
+            field = fields.get(alias)
+            if field is None:
+                field = lowered_fields.get(alias.lower())
+            if field is not None:
+                value = field.get("value")
+                break
+        settings[canonical_name] = value
+    return settings
 
 
 def detect_app_kind(app):
