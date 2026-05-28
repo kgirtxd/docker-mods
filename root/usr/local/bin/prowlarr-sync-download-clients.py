@@ -5,6 +5,7 @@ import copy
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -64,6 +65,7 @@ DEFAULTS = {
     "PROWLARR_SYNC_MANAGED_TAG": "prowlarr-sync-download-clients",
     "PROWLARR_SYNC_LOG_LEVEL": "info",
 }
+PROWLARR_DB_PATH = "/config/prowlarr.db"
 FIELD_ALIASES = {
     "BaseUrl": ("BaseUrl", "baseUrl"),
     "ApiKey": ("ApiKey", "apiKey"),
@@ -162,6 +164,53 @@ def request_json(method, base_url, path, headers, payload=None, timeout=15):
         return json.loads(body.decode("utf-8"))
 
 
+def parse_embedded_json(value, default):
+    if value in (None, ""):
+        return clone_json(default)
+    if isinstance(value, (dict, list)):
+        return clone_json(value)
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return clone_json(default)
+
+
+def load_provider_settings_from_db(table_name):
+    db_path = os.getenv("PROWLARR_SYNC_DB_PATH", PROWLARR_DB_PATH).strip() or PROWLARR_DB_PATH
+    if not os.path.exists(db_path):
+        logging.debug("Prowlarr db not found at %s", db_path)
+        return {}
+
+    rows_by_id = {}
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        cursor = connection.execute(f"SELECT * FROM {table_name}")
+        for row in cursor.fetchall():
+            item = dict(row)
+            row_id = item.get("Id")
+            if row_id is None:
+                continue
+            item["_settings"] = parse_embedded_json(item.get("Settings"), {})
+            item["_tags"] = parse_embedded_json(item.get("Tags"), [])
+            item["_categories"] = parse_embedded_json(item.get("Categories"), [])
+            rows_by_id[row_id] = item
+
+    return rows_by_id
+
+
+def merge_db_settings(api_items, db_rows):
+    merged = []
+    for item in api_items:
+        merged_item = clone_json(item)
+        row_id = merged_item.get("id")
+        db_item = db_rows.get(row_id)
+        if db_item:
+            merged_item["_settings"] = clone_json(db_item.get("_settings") or {})
+            merged_item["_db_row"] = db_item
+        merged.append(merged_item)
+    return merged
+
+
 def wait_for_prowlarr(base_url, headers, timeout):
     for path in ("/ping", "/api/v1/system/status"):
         try:
@@ -194,7 +243,30 @@ def field_map(resource):
     return {field.get("name"): field for field in resource.get("fields") or [] if field.get("name")}
 
 
+def normalize_settings_map(settings):
+    if not isinstance(settings, dict):
+        return {}
+    normalized = {}
+    for key, value in settings.items():
+        if key is None:
+            continue
+        normalized[str(key).lower()] = value
+    return normalized
+
+
 def extract_application_settings(app):
+    settings_map = normalize_settings_map(app.get("_settings"))
+    if settings_map:
+        settings = {}
+        for canonical_name, aliases in FIELD_ALIASES.items():
+            value = None
+            for alias in aliases:
+                if alias.lower() in settings_map:
+                    value = settings_map[alias.lower()]
+                    break
+            settings[canonical_name] = value
+        return settings
+
     fields = field_map(app)
     lowered_fields = {name.lower(): field for name, field in fields.items()}
     settings = {}
@@ -264,6 +336,42 @@ def build_field_list(schema_fields, existing_fields, prowlarr_fields):
     return fields
 
 
+def build_field_list_from_settings(schema_fields, existing_fields, prowlarr_settings):
+    schema_fields = schema_fields or []
+    existing_fields = existing_fields or []
+    settings_map = normalize_settings_map(prowlarr_settings)
+    existing_map = field_map({"fields": existing_fields})
+
+    ordered_names = []
+    for field in schema_fields + existing_fields:
+        name = field.get("name")
+        if name and name not in ordered_names:
+            ordered_names.append(name)
+
+    fields = []
+    for name in ordered_names:
+        existing_field = existing_map.get(name)
+        base_field = None
+        for field in schema_fields:
+            if field.get("name") == name:
+                base_field = clone_json(field)
+                break
+        if base_field is None and existing_field is not None:
+            base_field = clone_json(existing_field)
+        if base_field is None:
+            continue
+
+        if name.lower() in settings_map:
+            base_field["value"] = normalize_field_value(settings_map[name.lower()])
+        elif existing_field is not None:
+            base_field["value"] = normalize_field_value(existing_field.get("value"))
+        else:
+            base_field["value"] = normalize_field_value(base_field.get("value"))
+        fields.append(base_field)
+
+    return fields
+
+
 def build_client_payload(prowlarr_client, schema_client, existing_client, managed_tag_id):
     schema_client = schema_client or {}
     existing_client = existing_client or {}
@@ -282,11 +390,18 @@ def build_client_payload(prowlarr_client, schema_client, existing_client, manage
         elif key in schema_client:
             payload[key] = clone_json(schema_client.get(key))
 
-    payload["fields"] = build_field_list(
-        schema_client.get("fields"),
-        existing_client.get("fields"),
-        prowlarr_client.get("fields"),
-    )
+    if prowlarr_client.get("_settings"):
+        payload["fields"] = build_field_list_from_settings(
+            schema_client.get("fields"),
+            existing_client.get("fields"),
+            prowlarr_client.get("_settings"),
+        )
+    else:
+        payload["fields"] = build_field_list(
+            schema_client.get("fields"),
+            existing_client.get("fields"),
+            prowlarr_client.get("fields"),
+        )
 
     tags = []
     for tag in existing_client.get("tags") or schema_client.get("tags") or []:
@@ -504,6 +619,12 @@ def sync_once():
     prowlarr_clients = request_json(
         "GET", prowlarr_url, "/api/v1/downloadclient", prowlarr_headers, timeout=timeout
     ) or []
+    applications = merge_db_settings(
+        applications, load_provider_settings_from_db("Applications")
+    )
+    prowlarr_clients = merge_db_settings(
+        prowlarr_clients, load_provider_settings_from_db("DownloadClients")
+    )
 
     summary = {
         "apps_processed": 0,
