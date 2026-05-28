@@ -10,8 +10,8 @@ on:
         required: false
 
 env:
-  GITHUB_REPO: "linuxserver/docker-mods" #don't modify
-  ENDPOINT: "linuxserver/mods" #don't modify
+  GITHUB_REPO: "kgirtxd/docker-mods"
+  ENDPOINT: "kgirtxd/docker-mods"
   BASEIMAGE: "prowlarr" #replace
   MODNAME: "sync-download-clients" #replace
   MOD_VERSION: ${{ inputs.mod_version }} #don't modify
