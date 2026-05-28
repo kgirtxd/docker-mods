@@ -1,0 +1,8 @@
+#!/usr/bin/with-contenv bash
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "**** Adding python3 to package install list ****"
+    echo "python3" >> /mod-repo-packages-to-install.list
+else
+    echo "**** python3 already installed, skipping ****"
+fi

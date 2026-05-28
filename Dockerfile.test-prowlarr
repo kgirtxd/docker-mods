@@ -1,0 +1,3 @@
+FROM ghcr.io/linuxserver/prowlarr:latest
+
+COPY root/ /

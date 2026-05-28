@@ -1,0 +1,93 @@
+services:
+  prowlarr:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-prowlarr
+    image: prowlarr-sync-download-clients:test
+    container_name: prowlarr-test
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"
+      PROWLARR_SYNC_INTERVAL: "30"
+      PROWLARR_SYNC_LOG_LEVEL: "debug"
+    ports:
+      - "9696:9696"
+    tmpfs:
+      - /config
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9696/ping || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 45s
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent-test
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"
+      WEBUI_PORT: "8080"
+    ports:
+      - "8080:8080"
+    tmpfs:
+      - /config
+      - /downloads
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr-test
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"
+    ports:
+      - "8989:8989"
+    tmpfs:
+      - /config
+      - /tv
+      - /downloads
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr-test
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"
+    ports:
+      - "7878:7878"
+    tmpfs:
+      - /config
+      - /movies
+      - /downloads
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr-test
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"
+    ports:
+      - "8686:8686"
+    tmpfs:
+      - /config
+      - /music
+      - /downloads
+
+  readarr:
+    image: lscr.io/linuxserver/readarr:develop
+    container_name: readarr-test
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Etc/UTC"
+    ports:
+      - "8787:8787"
+    tmpfs:
+      - /config
+      - /books
+      - /downloads

@@ -1,5 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+*.py text eol=lf
+*.yml text eol=lf
+root/**/run text eol=lf
+root/**/up text eol=lf
+root/usr/local/bin/* text eol=lf
 
 # Custom for Visual Studio
 *.cs     diff=csharp
